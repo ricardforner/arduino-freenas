@@ -1,26 +1,34 @@
-/**
- * MonitorNAS por Ricard Forner
- */
 package es.rfksolutions.arduino;
 
-import gnu.io.CommPort;
-import gnu.io.CommPortIdentifier;
-import gnu.io.SerialPort;
-
-import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.Enumeration;
 import java.util.Properties;
 
-@SuppressWarnings("restriction")
+import es.rfksolutions.arduino.driver.CommPortDriver;
+import es.rfksolutions.arduino.nasclient.ServiceClient;
+import es.rfksolutions.arduino.queue.QueueUtil;
+
+/***
+ * Monitor actividad FreeNAS y publicación de estado a Arduino
+ * 
+ * @author ricardforner.feedback@gmail.com
+ * @version 1.0
+ */
 public class MonitorNAS {
 
 	public static String CONFIGURATION_FILE = "MonitorNAS.properties";
+	private String version = "0.1.0";
 
-    private CommPortIdentifier portId;
-	private boolean portFound = false;
-	private String portName;
+	private String portName;		// Nombre del puerto serie/USB
+	private String hostProtocol;	// Protocolo de comunicacion con FreeNAS
+	private String hostIP;			// IP del servidor FreeNAS
+	private int hostPort;			// Puerto del servidor web de administracion de FreeNAS
+	private String hostService;		// Pagina web del servicio de monitorizacion
+	private int hostRefresh;		// Tiempo de espera entre llamadas a FreeNAS
+
+	private boolean bDebugModule;	// Debug de los modulos
+	
+	private CommPortDriver driver;
+	private ServiceClient client;
 
 	private void initProperties() {
 		Properties propiedades = new Properties();
@@ -33,113 +41,71 @@ public class MonitorNAS {
 			} else {
 				System.out.println("Fichero de propiedades " + CONFIGURATION_FILE + " no encontrado");
 			}
-
+			// Recuperacion de variables del fichero de propiedades
 			portName = propiedades.getProperty("puerto_serie");
+			hostProtocol = propiedades.getProperty("host_protocol");
+			hostIP = propiedades.getProperty("host_ip");
+			if (propiedades.getProperty("host_port") != null) {
+				hostPort = Integer.valueOf(propiedades.getProperty("host_port")).intValue();
+			}
+			hostService = propiedades.getProperty("host_service");
+			if (propiedades.getProperty("host_refresh") != null) {
+				hostRefresh = Integer.valueOf(propiedades.getProperty("host_refresh")).intValue();
+			}
+			// Niveles de debug
+			bDebugModule = false;
+			if (propiedades.getProperty("debug_module") != null) {
+				bDebugModule = "1".equals(propiedades.getProperty("debug_module"));
+			}
 
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
 	}
 
-	@SuppressWarnings("unchecked")
 	private void initSerie() {
-		Enumeration<CommPortIdentifier> portList = CommPortIdentifier.getPortIdentifiers();
-		while (portList.hasMoreElements()) {
-			portId = portList.nextElement();
-			if (CommPortIdentifier.PORT_SERIAL == portId.getPortType()) {
-				if (portId.getName().equals(portName)) {
-					portFound = true;
-					break;
-				}
-			}
-		}
+		System.out.println("Iniciando servicio puerto Serie");
+		driver = new CommPortDriver();
+		driver.init(portName);		
+	}
+	
+	private void initLanService() {
+		System.out.println("Iniciando servicio de comunicación por red");
+		client = new ServiceClient(hostProtocol, hostIP, hostPort, hostService);
+		client.init(hostRefresh);
+		client.setDebugModule(bDebugModule);
+	}
+	
+	private void initQueue() {
+		System.out.println("Iniciando puente de comunicación.");
+		QueueUtil.getInstance().init();
 	}
 	
 	private void proceso() {
-		if (!portFound) {
+		System.out.println("Iniciando protocolo");
+		if (!driver.hasPortFound()) {
 			System.out.println("Puerto " + portName + " no encontrado.");
-			return;
-		}
-		
-		CommPortIdentifier portIdentifier = null;
-		try {
-			portIdentifier = CommPortIdentifier.getPortIdentifier(portName);
-			if (portIdentifier.isCurrentlyOwned()) {
-				System.out.println("Puerto " + portName + " esta en uso.");
-	        } else {
-	        	// Abrimos el puerto
-	        	CommPort commPort = portIdentifier.open(this.getClass().getName(),2000);
-	        	if (commPort instanceof SerialPort) {
-	                SerialPort serialPort = (SerialPort) commPort;
-	                serialPort.setSerialPortParams(
-	                		9600,
-	                		SerialPort.DATABITS_8,
-	                		SerialPort.STOPBITS_1,
-	                		SerialPort.PARITY_NONE);
-	                serialPort.notifyOnOutputEmpty(true);
-	                
-	                InputStream in = serialPort.getInputStream();
-	                OutputStream out = serialPort.getOutputStream();
-
-	                (new Thread(new SerialReader(in))).start();
-	                (new Thread(new SerialWriter(out))).start();
-	        	}
-	        }
-		} catch (Exception e) {
-			e.printStackTrace();
+		} else {
+			driver.start(QueueUtil.getInstance().getQueue());
+			client.start(QueueUtil.getInstance().getQueue());
 		}
 	}
-	
-    public static class SerialReader implements Runnable {
-        InputStream in;
-        
-        public SerialReader(InputStream in) {
-            this.in = in;
-        }
-        
-        public void run() {
-            byte[] buffer = new byte[1024];
-            int len = -1;
-            try {
-                while((len = this.in.read(buffer)) > -1) {
-                    System.out.print(new String(buffer,0,len));
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }            
-        }
-    }
-
-    public static class SerialWriter implements Runnable {
-        OutputStream out;
-        
-        public SerialWriter (OutputStream out) {
-            this.out = out;
-        }
-        
-        public void run() {
-            try {                
-                int c = 0;
-                while ((c = System.in.read()) > -1) {
-                    //this.out.write(c);
-                }                
-            }
-            catch (IOException e) {
-                e.printStackTrace();
-            }            
-        }
-    }
     
-
 	private void inicio() {
+		System.out.println("=========================================");
+		System.out.println("== MonitorNAS v"+ version +" - rfksolutions.es ==");
+		System.out.println("=========================================");
 		// Lectura properties
 		initProperties();
 		// Inicio puerto serie
 		initSerie();
+		// Inicio acceso servicio
+		initLanService();
+		// Inicio puente de comunicacion
+		initQueue();
 	}
 	
 	public static void main(String[] args) {
-		System.out.println("MonitorNAS v0.1 (C) Ricard Forner");
 		MonitorNAS obj = new MonitorNAS();
 		obj.inicio();
 		obj.proceso();
